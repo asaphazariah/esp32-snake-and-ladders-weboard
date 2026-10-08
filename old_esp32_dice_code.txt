@@ -1,0 +1,377 @@
+#include <Wire.h>
+#include <SPI.h>
+#include <LiquidCrystal_I2C.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Fonts/FreeMono9pt7b.h> 
+
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <LittleFS.h>
+
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_MOSI  23 
+#define OLED_CLK   18 
+#define OLED_DC    2
+#define OLED_CS    5
+#define OLED_RESET 4
+Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
+
+const int btnGameSelect = 25;   
+const int btnPlayerSelect = 26; 
+const int btnAction = 32;       
+const int buzzerPin = 13;       
+
+
+
+int gameState = 0;      
+int numPlayers = 2;
+int maxPlayers = 8;
+int currentPlayer = 1;
+
+int playerPositions[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0}; 
+
+bool lastGameBtn = HIGH;
+bool lastPlayerBtn = HIGH;
+bool lastActionBtn = HIGH;
+bool lcdPageTwo = false; 
+
+unsigned long lastInteractionTime = 0;
+unsigned long lastLcdFlipTime = 0;
+bool screensaverMode = false;
+int logoX = 10; int logoY = 15;
+int logoDX = 2; int logoDY = 2;
+
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Arcade Console: Live Board</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: 'Courier New', monospace; background: #111; color: white; text-align: center; margin: 0; padding: 2vh;}
+    h1 { margin-bottom: 5px; color: #00FF00; text-shadow: 0 0 10px #00FF00; }
+    
+    #board-container { 
+      position: relative; width: 90vmin; height: 90vmin; margin: 0 auto; 
+      background-image: url('/board.webp'); 
+      background-size: 100% 100%;
+      background-repeat: no-repeat;
+      border: 4px solid #fff; display: grid; 
+      grid-template-columns: repeat(10, 1fr); grid-template-rows: repeat(10, 1fr);
+    }
+    
+    .cell { background: transparent; display: flex; align-items: center; justify-content: center; }
+    .token { width: 4.5vmin; height: 4.5vmin; border-radius: 50%; position: absolute; transition: all 0.6s cubic-bezier(0.25, 1, 0.5, 1); border: 2px solid white; z-index: 10; box-shadow: 0 0 10px rgba(0,0,0,0.8);}
+  </style>
+</head>
+<body>
+  <h1>SNAKES & LADDERS : LIVE</h1>
+  <p>Status: <span id="status" style="color: yellow;">Connecting to ESP32...</span></p>
+  <div id="board-container"></div>
+
+  <script>
+    const board = document.getElementById('board-container');
+    const colors = ['#FF0000', '#0000FF', '#00FF00', '#FFFF00', '#FFA500', '#800080', '#00FFFF', '#FF00FF'];
+    const tokens = {};
+
+    for(let row = 9; row >= 0; row--) {
+      for(let col = 0; col < 10; col++) {
+        let num = row % 2 === 0 ? (row * 10) + col + 1 : (row * 10) + (9 - col) + 1;
+        let div = document.createElement('div');
+        div.className = 'cell'; div.id = 'cell-' + num;
+        board.appendChild(div);
+      }
+    }
+
+    function moveToken(playerNum, position) {
+      if(!tokens[playerNum]) {
+        let t = document.createElement('div'); t.className = 'token';
+        t.style.backgroundColor = colors[playerNum - 1];
+        board.appendChild(t); tokens[playerNum] = t;
+      }
+      
+      if(position === 0) {
+        tokens[playerNum].style.opacity = 0; 
+        return; 
+      }
+      
+      tokens[playerNum].style.opacity = 1;
+      let targetCell = document.getElementById('cell-' + position);
+      if(targetCell) {
+         tokens[playerNum].style.top = targetCell.offsetTop + (targetCell.offsetHeight/2) - (tokens[playerNum].offsetHeight/2) + 'px';
+         tokens[playerNum].style.left = targetCell.offsetLeft + (targetCell.offsetWidth/2) - (tokens[playerNum].offsetWidth/2) + 'px';
+      }
+    }
+
+    var gateway = `ws:
+    var websocket;
+    function initWebSocket() {
+      websocket = new WebSocket(gateway);
+      websocket.onopen    = () => { document.getElementById('status').innerText = "ONLINE"; document.getElementById('status').style.color = "#00FF00"; };
+      websocket.onclose   = () => { document.getElementById('status').innerText = "DISCONNECTED"; document.getElementById('status').style.color = "red"; setTimeout(initWebSocket, 2000); };
+      websocket.onmessage = (event) => {
+        var data = JSON.parse(event.data);
+        moveToken(data.player, data.position);
+      };
+    }
+    window.onload = initWebSocket;
+  </script>
+</body>
+</html>
+)rawliteral";
+
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(btnGameSelect, INPUT_PULLUP);
+  pinMode(btnPlayerSelect, INPUT_PULLUP);
+  pinMode(btnAction, INPUT_PULLUP);
+  pinMode(buzzerPin, OUTPUT); 
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  lcd.init(); lcd.backlight();
+  lcd.setCursor(0, 0); lcd.print("System Boot...");
+
+  if(!oled.begin(SSD1306_SWITCHCAPVCC)) {
+    Serial.println(F("OLED failed")); for(;;); 
+  }
+  
+  tone(buzzerPin, 1000, 100); delay(150); tone(buzzerPin, 1500, 200);
+
+  if(!LittleFS.begin(true)){
+    Serial.println("An Error has occurred while mounting LittleFS");
+  }
+
+  Serial.println("Starting Access Point...");
+  WiFi.softAP("Arcade_Console", "12345678"); 
+  
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+  
+  server.serveStatic("/board.webp", LittleFS, "/board.webp");
+  
+  server.addHandler(&ws);
+  server.begin();
+  
+  oled.clearDisplay(); oled.setTextSize(2); oled.setTextColor(WHITE);
+  oled.setCursor(15, 20); oled.print("GAME HUB");
+  oled.setTextSize(1); oled.setCursor(5, 45); oled.print("WIFI: 192.168.4.1");
+  oled.display(); delay(3000);
+
+  lastInteractionTime = millis(); 
+  drawDashboard();
+}
+
+
+void loop() {
+  ws.cleanupClients(); 
+
+  bool currGameBtn = digitalRead(btnGameSelect);
+  bool currPlayerBtn = digitalRead(btnPlayerSelect);
+  bool currActionBtn = digitalRead(btnAction);
+
+  if (millis() - lastInteractionTime > 30000) { 
+    if (!screensaverMode) { screensaverMode = true; lcd.noBacklight(); }
+    drawBouncingLogo();
+    if (currGameBtn == LOW || currPlayerBtn == LOW || currActionBtn == LOW) {
+      screensaverMode = false; lcd.backlight(); tone(buzzerPin, 1200, 50); 
+      lastInteractionTime = millis();
+      if(gameState == 0) drawDashboard(); else drawGameplayScreen();
+      delay(300); 
+    }
+    return; 
+  }
+
+  if (currGameBtn == LOW || currPlayerBtn == LOW || currActionBtn == LOW) { lastInteractionTime = millis(); }
+
+  if (gameState == 0) {
+    if (currGameBtn == LOW && lastGameBtn == HIGH) {
+      tone(buzzerPin, 600, 30); 
+    }
+    if (currPlayerBtn == LOW && lastPlayerBtn == HIGH) {
+      tone(buzzerPin, 800, 30); 
+      numPlayers++; if (numPlayers > maxPlayers) numPlayers = 2; 
+      drawDashboard();
+    }
+    if (currActionBtn == LOW && lastActionBtn == HIGH) {
+      tone(buzzerPin, 1047, 100); delay(100); tone(buzzerPin, 1319, 150); 
+      
+      for(int i = 1; i <= numPlayers; i++) { 
+         playerPositions[i] = 1; 
+         broadcastWebUpdate(i, 1); 
+      }
+      for(int i = numPlayers + 1; i <= 8; i++) { 
+         playerPositions[i] = 0; 
+         broadcastWebUpdate(i, 0); 
+      }
+      
+      gameState = 2; currentPlayer = 1; lcdPageTwo = false;
+      lastLcdFlipTime = millis(); 
+      screenWipe(); drawGameplayScreen();
+    }
+  }
+  else if (gameState == 2) {
+    if (numPlayers > 4 && millis() - lastLcdFlipTime > 3000) {
+      lcdPageTwo = !lcdPageTwo; updateLCDScoreboard(); lastLcdFlipTime = millis(); 
+    }
+    if (currPlayerBtn == LOW && lastPlayerBtn == HIGH) {
+      tone(buzzerPin, 400, 200); gameState = 0; screenWipe(); drawDashboard();
+    }
+    if (currActionBtn == LOW && lastActionBtn == HIGH) {
+      playSnakesAndLadders(); 
+    }
+  }
+
+  lastGameBtn = currGameBtn; lastPlayerBtn = currPlayerBtn; lastActionBtn = currActionBtn;
+  delay(50); 
+}
+
+
+void rollSound() { for (int i = 200; i <= 1000; i += 100) { tone(buzzerPin, i, 20); delay(20); } }
+void ladderSound() { int notes[] = {262, 330, 392, 523, 659, 784, 1047}; for(int i=0; i<7; i++) { tone(buzzerPin, notes[i], 100); delay(100); } }
+void snakeSound() { for(int i = 800; i > 200; i -= 15) { tone(buzzerPin, i, 25); delay(25); } }
+void winFanfare() { tone(buzzerPin, 523, 150); delay(150); tone(buzzerPin, 523, 150); delay(150); tone(buzzerPin, 659, 400); delay(400); tone(buzzerPin, 784, 600); }
+
+void screenWipe() { for (int i = 0; i <= SCREEN_WIDTH; i += 12) { oled.fillRect(0, 0, i, SCREEN_HEIGHT, BLACK); oled.display(); } }
+
+void drawBouncingLogo() {
+  oled.clearDisplay(); oled.setFont(&FreeMono9pt7b); oled.setTextSize(1);
+  oled.setCursor(logoX, logoY); oled.print("ARCADE");
+  oled.setFont(); 
+  logoX += logoDX; logoY += logoDY;
+  if(logoX <= 0 || logoX >= 80) logoDX = -logoDX;
+  if(logoY <= 15 || logoY >= 50) logoDY = -logoDY; 
+  oled.display(); delay(40);
+}
+
+void drawDashboard() {
+  lcd.clear(); lcd.setCursor(0, 0); lcd.print("   Main  Menu"); lcd.setCursor(0, 1); lcd.print("B3: START GAME"); 
+  oled.clearDisplay(); oled.setTextSize(2); 
+  oled.setCursor(0, 5); oled.print(">SNAKES");
+  oled.setCursor(0, 25); oled.print(">"); oled.print(numPlayers); oled.print(" Plyrs");
+  oled.setTextSize(1); oled.setCursor(10, 50); oled.print("IP: 192.168.4.1");
+  oled.display();
+}
+
+void updateLCDScoreboard() {
+  lcd.clear();
+  int startIdx = lcdPageTwo ? 5 : 1; 
+  lcd.setCursor(0, 0);
+  if (startIdx <= numPlayers) { lcd.print("P"); lcd.print(startIdx); lcd.print(":"); lcd.print(playerPositions[startIdx]); }
+  if (startIdx + 1 <= numPlayers) { lcd.setCursor(8, 0); lcd.print("P"); lcd.print(startIdx + 1); lcd.print(":"); lcd.print(playerPositions[startIdx + 1]); }
+  lcd.setCursor(0, 1);
+  if (startIdx + 2 <= numPlayers) { lcd.print("P"); lcd.print(startIdx + 2); lcd.print(":"); lcd.print(playerPositions[startIdx + 2]); }
+  if (startIdx + 3 <= numPlayers) { lcd.setCursor(8, 1); lcd.print("P"); lcd.print(startIdx + 3); lcd.print(":"); lcd.print(playerPositions[startIdx + 3]); }
+}
+
+void drawGameplayScreen() {
+  updateLCDScoreboard(); oled.clearDisplay(); oled.setTextSize(2); 
+  oled.setCursor(15, 0); oled.print("PLAYER "); oled.print(currentPlayer);
+  oled.setCursor(10, 25); oled.print("Press B3");
+  oled.setCursor(10, 45); oled.print("To Roll!"); oled.display();
+}
+
+void showOLEDMessage(String msg1, String msg2) {
+  oled.clearDisplay(); oled.setTextSize(2);
+  oled.setCursor(0, 15); oled.print(msg1);
+  oled.setCursor(0, 40); oled.print(msg2); oled.display();
+}
+
+
+void drawDiceFace(int num) {
+  oled.clearDisplay(); oled.drawRoundRect(40, 8, 48, 48, 8, WHITE);
+  if(num==1 || num==3 || num==5) oled.fillCircle(64, 32, 4, WHITE); 
+  if(num==2 || num==3 || num==4 || num==5 || num==6) { oled.fillCircle(50, 18, 4, WHITE); oled.fillCircle(78, 46, 4, WHITE); } 
+  if(num==4 || num==5 || num==6) { oled.fillCircle(78, 18, 4, WHITE); oled.fillCircle(50, 46, 4, WHITE); } 
+  if(num==6) { oled.fillCircle(50, 32, 4, WHITE); oled.fillCircle(78, 32, 4, WHITE); } 
+  oled.display();
+}
+
+int rollDiceWithAnimation() {
+  int finalRoll = 0;
+  for (int i = 0; i < 10; i++) { drawDiceFace(random(1, 7)); tone(buzzerPin, random(500, 1200), 30); delay(100); }
+  finalRoll = random(1, 7); drawDiceFace(finalRoll); rollSound(); delay(1000); 
+  return finalRoll;
+}
+
+void animateSnakeBite() { screenWipe(); oled.fillCircle(45, 15, 6, BLACK); oled.fillCircle(83, 15, 6, BLACK); oled.setFont(&FreeMono9pt7b); oled.setTextSize(1); oled.setCursor(25, 60); oled.print("CHOMP!"); oled.setFont(); oled.display(); snakeSound(); delay(2000); }
+void animateLadderClimb() { screenWipe(); oled.setTextSize(2); oled.setCursor(0, 25); oled.print("UP!"); oled.setCursor(90, 25); oled.print("UP!"); oled.display(); ladderSound(); delay(2000); }
+
+
+void broadcastWebUpdate(int player, int position) {
+  String jsonMessage = "{\"player\":" + String(player) + ",\"position\":" + String(position) + "}";
+  ws.textAll(jsonMessage);
+}
+
+void nextTurn() {
+  currentPlayer++; if (currentPlayer > numPlayers) currentPlayer = 1;
+  lastLcdFlipTime = millis(); 
+  if (currentPlayer <= 4) lcdPageTwo = false; else lcdPageTwo = true;
+  screenWipe(); drawGameplayScreen();
+}
+
+bool checkWin(int targetScore) {
+  if (playerPositions[currentPlayer] >= targetScore) {
+    playerPositions[currentPlayer] = targetScore; updateLCDScoreboard(); broadcastWebUpdate(currentPlayer, targetScore);
+    lcd.clear(); lcd.print(" PLAYER "); lcd.print(currentPlayer); lcd.setCursor(0, 1); lcd.print("   WINS GAME!");
+    screenWipe(); oled.clearDisplay(); oled.setFont(&FreeMono9pt7b); oled.setTextSize(1); oled.setCursor(10, 35); oled.print("WINNER!"); oled.setFont(); oled.display(); 
+    winFanfare(); delay(4000); gameState = 0; drawDashboard(); return true; 
+  }
+  return false;
+}
+
+void playSnakesAndLadders() {
+  int roll = rollDiceWithAnimation();
+  bool getsAnotherTurn = false;
+
+  int newPos = playerPositions[currentPlayer] + roll;
+  
+  if (newPos > 100) {
+    newPos = playerPositions[currentPlayer]; 
+    showOLEDMessage("Too High!", "Need exact"); delay(1500);
+  } else {
+    if (checkWin(100)) return; 
+    
+    bool event = false;
+    
+    if (newPos == 7)  { newPos = 30; animateLadderClimb(); event = true; }
+    if (newPos == 16) { newPos = 33; animateLadderClimb(); event = true; }
+    if (newPos == 20) { newPos = 38; animateLadderClimb(); event = true; }
+    if (newPos == 36) { newPos = 83; animateLadderClimb(); event = true; }
+    if (newPos == 50) { newPos = 68; animateLadderClimb(); event = true; }
+    if (newPos == 63) { newPos = 81; animateLadderClimb(); event = true; }
+    if (newPos == 71) { newPos = 89; animateLadderClimb(); event = true; }
+    if (newPos == 86) { newPos = 97; animateLadderClimb(); event = true; }
+
+    if (newPos == 25) { newPos = 3;  animateSnakeBite(); event = true; }
+    if (newPos == 42) { newPos = 1;  animateSnakeBite(); event = true; }
+    if (newPos == 56) { newPos = 48; animateSnakeBite(); event = true; }
+    if (newPos == 61) { newPos = 43; animateSnakeBite(); event = true; }
+    if (newPos == 92) { newPos = 67; animateSnakeBite(); event = true; }
+    if (newPos == 94) { newPos = 10; animateSnakeBite(); event = true; }
+    if (newPos == 98) { newPos = 80; animateSnakeBite(); event = true; }
+
+    playerPositions[currentPlayer] = newPos;
+    updateLCDScoreboard(); 
+    broadcastWebUpdate(currentPlayer, newPos); 
+    
+    if(!event) { showOLEDMessage("Moved to:", "Square " + String(newPos)); delay(1500); }
+  }
+  
+  if (roll == 6) getsAnotherTurn = true;
+  if (getsAnotherTurn) {
+    showOLEDMessage("Bonus Turn!", "Roll Again!"); tone(buzzerPin, 880, 150); delay(2000);
+    screenWipe(); drawGameplayScreen(); 
+  } else {
+    nextTurn();
+  }
+}

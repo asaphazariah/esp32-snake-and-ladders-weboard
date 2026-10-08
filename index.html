@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Snakes & Ladders | ESP32 Jumbotron</title>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="game-container">
+  <header class="game-header">
+    <h1>🐍 Snakes & Ladders 🪜</h1>
+    <div class="status-bar" id="status-bar">Welcome! Add players to start.</div>
+  </header>
+  
+  <main class="game-main">
+    <div class="board-section">
+      <div class="board-wrapper">
+        <div class="board" id="game-board">
+          <!-- JS will create 100 cell divs here -->
+        </div>
+      </div>
+    </div>
+    
+    <aside class="side-panel">
+      <div class="dice-section">
+        <h2>🎲 Dice</h2>
+        <div class="dice-container">
+          <div class="dice" id="dice">
+            <div class="dice-face" id="dice-face">
+              <!-- JS creates dot pattern -->
+            </div>
+          </div>
+        </div>
+        <div class="last-roll" id="last-roll"></div>
+      </div>
+      
+      <div class="players-section">
+        <h2>👥 Players</h2>
+        <div class="players-list" id="players-list">
+          <!-- JS creates player cards -->
+        </div>
+      </div>
+      
+      
+      <div class="controls-section" id="add-player-controls">
+        <h2>✏️ Customize Player Name</h2>
+        <div class="player-add">
+          <input type="text" id="player-name-input" placeholder="Type name for Player 1..." maxlength="12">
+          <button class="btn btn-add" id="add-player-btn">Rename</button>
+        </div>
+        <div style="font-size: 0.75rem; color: #a0aec0; margin-top: 6px;">
+          💡 You can also click directly on any player name above to edit!
+        </div>
+      </div>
+      
+      <div class="connection-status" id="connection-status">
+        <span class="status-dot offline"></span>
+        <span>Offline Mode</span>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<!-- Winner overlay -->
+<div class="winner-overlay" id="winner-overlay" style="display:none;">
+  <div class="winner-content">
+    <div class="winner-emoji">🏆</div>
+    <h2 class="winner-title" id="winner-title">Player Wins!</h2>
+    <p class="winner-subtitle">Congratulations!</p>
+    <canvas id="confetti-canvas"></canvas>
+    <button class="btn btn-play-again" id="play-again-btn">Play Again</button>
+  </div>
+</div>
+
+<!-- Event toast -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
